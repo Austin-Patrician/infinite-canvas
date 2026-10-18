@@ -4,6 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { NEW_API_URL } from "@/constant/env";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -65,30 +66,31 @@ export type WebdavSyncConfig = {
     directory: string;
     lastSyncedAt: string;
 };
-export type ConfigTabKey = "channels" | "local-proxy" | "preferences" | "prompt-sources" | "webdav" | "local-storage";
+export type ConfigTabKey = "account" | "channels" | "preferences" | "prompt-sources" | "webdav" | "local-storage";
 
 export type ChannelCredentialsImportResult = {
-    status: "created" | "updated" | "missing-base-url" | "invalid-base-url";
+    status: "updated" | "missing-base-url" | "invalid-base-url";
     channelName?: string;
 };
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
+/** 只保留一个写死的官方渠道，地址固定指向我们的 new-api。 */
+export const OFFICIAL_CHANNEL_ID = "wordless";
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
-export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
 export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
-    baseUrl: OPENAI_BASE_URL,
+    baseUrl: NEW_API_URL,
     apiKey: "",
     apiFormat: "openai",
     channels: [
         {
-            id: "default",
-            name: i18n.t("config.channels.defaultName"),
-            baseUrl: OPENAI_BASE_URL,
+            id: OFFICIAL_CHANNEL_ID,
+            name: i18n.t("config.channels.officialName"),
+            baseUrl: NEW_API_URL,
             apiKey: "",
             apiFormat: "openai",
             models: [
@@ -99,11 +101,11 @@ export const defaultConfig: AiConfig = {
             ],
         },
     ],
-    model: "default::gpt-image-2",
-    imageModel: "default::gpt-image-2",
-    videoModel: "default::grok-imagine-video",
-    textModel: "default::gpt-5.5",
-    audioModel: "default::gpt-4o-mini-tts",
+    model: encodeChannelModel(OFFICIAL_CHANNEL_ID, "gpt-image-2"),
+    imageModel: encodeChannelModel(OFFICIAL_CHANNEL_ID, "gpt-image-2"),
+    videoModel: encodeChannelModel(OFFICIAL_CHANNEL_ID, "grok-imagine-video"),
+    textModel: encodeChannelModel(OFFICIAL_CHANNEL_ID, "gpt-5.5"),
+    audioModel: encodeChannelModel(OFFICIAL_CHANNEL_ID, "gpt-4o-mini-tts"),
     audioVoice: "alloy",
     audioFormat: "mp3",
     audioSpeed: "1",
@@ -115,7 +117,7 @@ export const defaultConfig: AiConfig = {
     videoMode: "frames",
     systemPrompt: "",
     reasoningEffort: "auto",
-    models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
+    models: [encodeChannelModel(OFFICIAL_CHANNEL_ID, "gpt-image-2"), encodeChannelModel(OFFICIAL_CHANNEL_ID, "grok-imagine-video"), encodeChannelModel(OFFICIAL_CHANNEL_ID, "gpt-5.5"), encodeChannelModel(OFFICIAL_CHANNEL_ID, "gpt-4o-mini-tts")],
     quality: "auto",
     size: "1:1",
     background: "",
@@ -142,6 +144,7 @@ type ConfigStore = {
     configTab: ConfigTabKey;
     shouldPromptContinue: boolean;
     updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
+    applyOfficialChannel: (input: { apiKey?: string; models?: string[] }) => void;
     importChannelCredentials: (input: { baseUrl?: string | null; apiKey?: string | null }) => ChannelCredentialsImportResult;
     updateWebdavConfig: <K extends keyof WebdavSyncConfig>(key: K, value: WebdavSyncConfig[K]) => void;
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
@@ -218,7 +221,7 @@ export const useConfigStore = create<ConfigStore>()(
             config: defaultConfig,
             webdav: defaultWebdavSyncConfig,
             isConfigOpen: false,
-            configTab: "channels",
+            configTab: "account",
             shouldPromptContinue: false,
             updateConfig: (key, value) =>
                 set((state) => ({
@@ -227,6 +230,16 @@ export const useConfigStore = create<ConfigStore>()(
                         [key]: value,
                     },
                 })),
+            applyOfficialChannel: ({ apiKey, models }) =>
+                set((state) => {
+                    const channel = state.config.channels.find((item) => item.id === OFFICIAL_CHANNEL_ID);
+                    if (!channel) return state;
+                    // apiKey 传 undefined 表示不改动，传空字符串表示清空密钥。
+                    const key = apiKey === undefined ? channel.apiKey : apiKey.trim();
+                    const nextModels = models ? mergeChannelModels(channel.models, models) : channel.models;
+                    if (key === channel.apiKey && nextModels === channel.models) return state;
+                    return { config: withChannels(state.config, [{ ...channel, apiKey: key, models: nextModels }]) };
+                }),
             importChannelCredentials: (input) => {
                 const currentConfig = get().config;
                 const result = upsertChannelCredentials(currentConfig, input);
@@ -241,7 +254,9 @@ export const useConfigStore = create<ConfigStore>()(
                     },
                 })),
             isAiConfigReady: (config, model) => isAiConfigReady(config, model),
-            openConfigDialog: (shouldPromptContinue = false, configTab = "channels") => set({ isConfigOpen: true, shouldPromptContinue, configTab }),
+            openConfigDialog: (shouldPromptContinue = false, configTab) =>
+                // 默认落在帐号中心：密钥和模型同步都在这里，也是配置没就绪时唯一要处理的地方。
+                set({ isConfigOpen: true, shouldPromptContinue, configTab: configTab || "account" }),
             setConfigDialogOpen: (isConfigOpen) => set({ isConfigOpen }),
             clearPromptContinue: () => set({ shouldPromptContinue: false }),
         }),
@@ -262,7 +277,9 @@ export const useConfigStore = create<ConfigStore>()(
                     config: {
                         ...config,
                         channelMode: "local",
-                        apiFormat: normalizeApiFormat(config.apiFormat),
+                        baseUrl: channels[0].baseUrl,
+                        apiKey: channels[0].apiKey,
+                        apiFormat: "openai",
                         channels,
                         models,
                         imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
@@ -280,7 +297,8 @@ export const useConfigStore = create<ConfigStore>()(
                         videoWatermark: config.videoWatermark || "false",
                         videoMode: config.videoMode === "reference" ? "reference" : "frames",
                         canvasImageCount: config.canvasImageCount || "3",
-                        proxyEnabled: Boolean(config.proxyEnabled),
+                        // 本地代理功能不再对用户开放，统一关闭，避免历史本地设置继续走转发。
+                        proxyEnabled: false,
                         proxyUrl: config.proxyUrl || DEFAULT_LOCAL_PROXY_URL,
                         nodeRegenerateBehavior: config.nodeRegenerateBehavior === "overwrite" ? "overwrite" : "new-node",
                         autoFocusOnSelect: Boolean(config.autoFocusOnSelect),
@@ -332,27 +350,13 @@ export function upsertChannelCredentials(
     if (!isHttpBaseUrl(rawBaseUrl)) return { status: "invalid-base-url", config };
 
     const baseUrl = normalizeImportedBaseUrl(rawBaseUrl);
+    // 只接受官方地址：其它地址不再写入渠道。
+    if (normalizedBaseUrlKey(baseUrl) !== normalizedBaseUrlKey(NEW_API_URL)) return { status: "invalid-base-url", config };
+
+    const channel = config.channels.find((item) => item.id === OFFICIAL_CHANNEL_ID);
     const apiKey = input.apiKey?.trim() || "";
-    const matchingIndex = config.channels.findIndex((channel) => normalizedBaseUrlKey(channel.baseUrl) === normalizedBaseUrlKey(baseUrl));
-
-    if (matchingIndex >= 0) {
-        const existing = config.channels[matchingIndex];
-        if (existing.baseUrl === baseUrl && (!apiKey || existing.apiKey === apiKey)) {
-            return { status: "updated", channelName: existing.name, config };
-        }
-        const updated = { ...existing, baseUrl, ...(apiKey ? { apiKey } : {}) };
-        const channels = config.channels.map((channel, index) => (index === matchingIndex ? updated : channel));
-        return { status: "updated", channelName: existing.name, config: { ...config, channels } };
-    }
-
-    const channel = createModelChannel({
-        name: importedChannelName(baseUrl),
-        baseUrl,
-        apiKey,
-        apiFormat: "openai",
-        models: [],
-    });
-    return { status: "created", channelName: channel.name, config: { ...config, channels: [...config.channels, channel] } };
+    if (!channel || !apiKey || channel.apiKey === apiKey) return { status: "updated", channelName: channel?.name, config };
+    return { status: "updated", channelName: channel.name, config: withChannels(config, [{ ...channel, apiKey }]) };
 }
 
 function isHttpBaseUrl(baseUrl: string) {
@@ -382,9 +386,35 @@ function stripTrailingApiVersion(baseUrl: string) {
     return baseUrl.replace(/\/v1$/i, "");
 }
 
-function importedChannelName(baseUrl: string) {
-    const hostname = new URL(baseUrl).hostname;
-    return hostname.replace(/^(?:www|api)\./i, "") || i18n.t("config.channels.newName");
+/** 合并拉取到的模型名：保留本地已有的能力与脚本配置，新模型按名称猜测能力。 */
+export function mergeChannelModels(models: ChannelModel[], names: string[]) {
+    const known = new Map(models.map((model) => [model.name, model]));
+    return normalizeChannelModels(names.map((name) => known.get(name) || { name, capability: guessCapability(name) }));
+}
+
+/** 渠道变化后同步派生字段：模型选项、顶层地址与各能力的默认模型。 */
+export function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {
+    const next: AiConfig = {
+        ...config,
+        channels,
+        models: modelOptionsFromChannels(channels),
+        baseUrl: channels[0]?.baseUrl || config.baseUrl,
+        apiKey: channels[0]?.apiKey || config.apiKey,
+        apiFormat: channels[0]?.apiFormat || config.apiFormat,
+    };
+    return {
+        ...next,
+        imageModel: pickDefaultModel(next, "image", config.imageModel),
+        videoModel: pickDefaultModel(next, "video", config.videoModel),
+        textModel: pickDefaultModel(next, "text", config.textModel),
+        audioModel: pickDefaultModel(next, "audio", config.audioModel),
+    };
+}
+
+function pickDefaultModel(config: AiConfig, capability: ModelCapability, current: string) {
+    const options = selectableModelsByCapability(config, capability);
+    const normalized = normalizeModelOptionValue(current, config.channels);
+    return options.includes(normalized) ? normalized : options[0] || "";
 }
 
 export function encodeChannelModel(channelId: string, model: string) {
@@ -446,29 +476,22 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
     };
 }
 
+/** 渠道写死：只保留官方渠道，地址与协议固定，仅沿用本地已保存的密钥与模型。 */
 function normalizeChannels(config: AiConfig) {
     const persistedChannels = Array.isArray(config.channels) ? config.channels : [];
-    const channels = persistedChannels.map((channel, index) =>
-        createModelChannel({
-            ...channel,
-            id: channel.id || (index === 0 ? "default" : `channel-${index + 1}`),
-            name: channel.name || (index === 0 ? i18n.t("config.channels.defaultName") : i18n.t("config.channels.indexedName", { index: index + 1 })),
-            models: normalizeChannelModels(channel.models),
-        }),
+    const official = persistedChannels.find(
+        (channel) => channel.id === OFFICIAL_CHANNEL_ID || normalizedBaseUrlKey(channel.baseUrl || "") === normalizedBaseUrlKey(NEW_API_URL),
     );
-    if (!channels.length) {
-        channels.push(
-            createModelChannel({
-                id: "default",
-                name: i18n.t("config.channels.defaultName"),
-                baseUrl: config.baseUrl || defaultConfig.baseUrl,
-                apiKey: config.apiKey || "",
-                apiFormat: config.apiFormat || defaultConfig.apiFormat,
-                models: normalizeChannelModels([config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel].map(modelOptionName)),
-            }),
-        );
-    }
-    return channels;
+    return [
+        createModelChannel({
+            id: OFFICIAL_CHANNEL_ID,
+            name: i18n.t("config.channels.officialName"),
+            baseUrl: NEW_API_URL,
+            apiKey: official?.apiKey || "",
+            apiFormat: "openai",
+            models: normalizeChannelModels(official?.models),
+        }),
+    ];
 }
 
 export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
@@ -497,7 +520,10 @@ export function normalizeLocalProxyUrl(value: string) {
     return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
 }
 
-/** Prefix an outgoing request with the local forwarding proxy so the browser is not blocked by CORS. */
+/**
+ * 本地代理转发能力：功能已下线，proxyEnabled 恒为 false，此函数只作为遗留调用点的空操作保留。
+ * 我们的上游固定是自己的 new-api，跨域问题在服务端解决，不需要用户配置本机代理。
+ */
 export function withLocalProxy(url: string) {
     const { proxyEnabled, proxyUrl } = useConfigStore.getState().config;
     if (!proxyEnabled || !/^https?:\/\//i.test(url)) return url;
